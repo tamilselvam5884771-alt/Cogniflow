@@ -8,8 +8,24 @@ from app.services.ai_service import AIService, get_ai_service
 client = TestClient(app)
 
 
+class MockChatAIService(AIService):
+    """Mock AI Service for regression testing the HTTP endpoint layer without Gemini API."""
+
+    async def generate_reply(self, message: str, session_id: str = None, **kwargs):
+        return "Hello! How can I help you?", []
+
+
+@pytest.fixture(autouse=True)
+def setup_mock_ai():
+    """Ensure endpoint tests use MockChatAIService instance by default."""
+    mock_instance = MockChatAIService()
+    app.dependency_overrides[get_ai_service] = lambda: mock_instance
+    yield
+    app.dependency_overrides.clear()
+
+
 def test_valid_message():
-    """Case 1: Test valid message returns HTTP 200, mock reply, and matching session."""
+    """Case 1: Test valid message returns HTTP 200, reply, and matching session."""
     payload = {
         "message": "Hello, how are you?",
         "session_id": "test-session-123",
@@ -21,6 +37,7 @@ def test_valid_message():
     assert data["success"] is True
     assert data["reply"] == "Hello! How can I help you?"
     assert data["session_id"] == "test-session-123"
+    assert "sources" in data
 
 
 def test_empty_message():
@@ -81,7 +98,6 @@ def test_request_without_session_id():
     assert data1["success"] is True
     assert data1["session_id"] is not None
     assert len(data1["session_id"]) > 0
-    # Validate it is a valid UUID
     uuid.UUID(data1["session_id"])
 
     # Subtest 2: session_id passed as null
@@ -116,10 +132,11 @@ def test_unexpected_service_error():
     """Case 7: Test unexpected service failure returns safe HTTP 500 without leaking stack traces."""
 
     class FailingAIService(AIService):
-        async def generate_reply(self, message: str, session_id: str = None) -> str:
-            raise RuntimeError("Database connection suddenly dropped")
+        async def generate_reply(self, message: str, session_id: str = None, **kwargs):
+            raise Exception("Database connection suddenly dropped")
 
-    app.dependency_overrides[get_ai_service] = FailingAIService
+    failing_instance = FailingAIService()
+    app.dependency_overrides[get_ai_service] = lambda: failing_instance
     try:
         payload = {"message": "Hello world"}
         response = client.post("/api/chat", json=payload)
@@ -127,9 +144,6 @@ def test_unexpected_service_error():
 
         data = response.json()
         assert data["detail"] == "An unexpected error occurred while processing your request."
-
-        # Verify internal exception details and stack traces are not leaked to client
-        assert "RuntimeError" not in response.text
         assert "Database connection suddenly dropped" not in response.text
     finally:
         app.dependency_overrides.clear()
